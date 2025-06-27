@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>View PDF</title>
+    <style>
+        /* ===== Base Layout ===== */
+        html,body{margin:0;padding:0;height:100%;overflow:hidden;font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;}
+        #pdfEmbed{position:absolute;top:0;left:0;width:100%;height:100%;border:none;}
+
+        /* ===== GitHub Issues‑dark inspired portal ===== */
+        #portal{display:none;box-sizing:border-box;padding:1rem;max-width:640px;margin:0 auto;height:100%;overflow-y:auto;background:#0d1117;color:#c9d1d9;}
+        #portal h3{margin-top:0;color:#58a6ff;font-size:1.25rem;font-weight:600;}
+        #portal p{margin:.4rem 0;font-size:.875rem;}
+        #portal button{display:inline-block;margin:.25rem .25rem .5rem 0;padding:.45rem .85rem;font-size:.75rem;font-weight:600;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;}
+        #portal button:hover{background:#30363d;cursor:pointer;}
+        #csvArea{width:100%;box-sizing:border-box;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.5rem;font-size:.75rem;}
+        /* Mobile friendliness */
+        @media(max-width:480px){#portal{padding:.75rem;}}
+    </style>
+
+    <script>
+    /* ========= Utility ========= */
+    const rand = () => {
+        const a=new Uint32Array(1);crypto.getRandomValues(a);return a[0]/(0xFFFFFFFF+1);
+    };
+    const getParams = () => {
+        const p=new URLSearchParams(window.location.search.replace(/\+$/,''));
+        return{fileName:p.get('fileName')||null,randIdx:p.get('randIdx'),portal:p.has('portal')};
+    };
+    const hasPlusMode = () => window.location.search.endsWith('+');
+    const endsWithHashMode = () => window.location.hash==='#!' || window.location.hash==='#';
+    const parseRange = n=>{const m=n? n.match(/-(\d+)-(\d+)\.pdf$/):null;return m?{start:+m[1],end:+m[2]}:{start:1,end:1};};
+
+    /* ========= IndexedDB ========= */
+    const DB_NAME='viewerRangeDB',DB_VERSION=3,B1='bucket1',B2='bucket2';
+    function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,DB_VERSION);r.onupgradeneeded=e=>{const db=e.target.result;const ensure=n=>{let s=db.objectStoreNames.contains(n)?e.target.transaction.objectStore(n):db.createObjectStore(n,{keyPath:'id'});if(!s.indexNames.contains('file'))s.createIndex('file','file',{unique:false});};ensure(B1);ensure(B2);};r.onsuccess=e=>res(e.target.result);r.onerror=e=>rej(e.target.error);});}
+
+    async function getAll(store,fileFilter){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const st=tx.objectStore(store);const req=fileFilter&&st.indexNames.contains('file')?st.index('file').getAll(fileFilter):st.getAll();req.onsuccess=e=>res(e.target.result||[]);req.onerror=e=>rej(e.target.error);});}
+
+    async function updateCard(store,file,page,start,end,override={}){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readwrite');const st=tx.objectStore(store);const id=file+'|'+page;const now=Date.now();const req=st.get(id);req.onsuccess=()=>{let c=req.result;if(c){c.lastSeen=override.lastSeen||now;c.frequency=(c.frequency||0)+(override.freqInc||1);c.added=Math.min(c.added||now,override.added||now);}else{c={id,file,page,start,end,added:override.added||now,lastSeen:override.lastSeen||now,frequency:override.freqInc||1};}st.put(c);};tx.oncomplete=()=>res();tx.onerror=e=>rej(e.target.error);});}
+
+    async function addVisit(file,page,start,end){await updateCard(B1,file,page,start,end);const neigh=new Set([page]);if(page-1>=start)neigh.add(page-1);else if(page+1<=end)neigh.add(page+1);if(page+1<=end)neigh.add(page+1);else if(page-1>=start)neigh.add(page-1);for(const p of neigh)await updateCard(B2,file,p,start,end);} 
+
+    const srsPick=cards=>{if(!cards.length)return null;const now=Date.now();let best=null,score=-1e9;for(const c of cards){const s=(now-(c.lastSeen||c.added))/((c.frequency)||1);if(s>score){score=s;best=c;}}return best;};
+
+    async function ensureB2(fileFilter){const[b1,b2]=await Promise.all([getAll(B1,fileFilter),getAll(B2,fileFilter)]);if(!b2.length&&b1.length){await Promise.all(b1.map(c=>updateCard(B2,c.file,c.page,c.start,c.end,{added:c.added,lastSeen:c.lastSeen,freqInc:c.frequency})));} }
+
+    async function randomPick(fileFilter){await ensureB2(fileFilter);const[b1,b2]=await Promise.all([getAll(B1,fileFilter),getAll(B2,fileFilter)]);let arr;arr=rand()<0.67&&b2.length?b2:(b1.length?b1:b2);return arr.length?arr[Math.floor(rand()*arr.length)]:null;}
+    async function algoPick(fileFilter){if(rand()<0.5){const c=srsPick(await getAll(B1,fileFilter));if(c)return c;}return randomPick(fileFilter);} 
+
+    /* ========= Cache ========= */
+    function openPdfCache(){return new Promise((res,rej)=>{const r=indexedDB.open('pdfCache',1);r.onupgradeneeded=e=>e.target.result.createObjectStore('files');r.onsuccess=e=>res(e.target.result);r.onerror=e=>rej(e.target.error);});}
+    async function getPdf(file){const db=await openPdfCache();return new Promise((res,rej)=>{const tx=db.transaction('files','readonly');const req=tx.objectStore('files').get(file);req.onsuccess=e=>res(e.target.result||null);req.onerror=e=>rej(e.target.error);});}
+    async function putPdf(file,blob){const db=await openPdfCache();return new Promise((res,rej)=>{const tx=db.transaction('files','readwrite');tx.objectStore('files').put(blob,file);tx.oncomplete=()=>res();tx.onerror=e=>rej(e.target.error);});}
+    async function pdfUrl(file){let b=await getPdf(file);if(!b){b=await (await fetch(file)).blob();await putPdf(file,b);}return URL.createObjectURL(b);} 
+
+    /* ========= Portal UI ========= */
+    async function showPortal(){const[b1,b2]=await Promise.all([getAll(B1),getAll(B2)]);const all=b1.concat(b2);const size=new Blob([JSON.stringify({b1,b2})]).size;const earliest=all.length?new Date(Math.min(...all.map(c=>c.added||c.lastSeen))).toLocaleString():'N/A';const latest=all.length?new Date(Math.max(...all.map(c=>c.lastSeen||c.added))).toLocaleString():'N/A';const div=document.getElementById('portal');div.style.display='block';div.innerHTML=`<h3>Portal</h3><p>Total JSON size: ${size} bytes</p><p>Bucket1: ${b1.length} cards</p><p>Bucket2: ${b2.length} cards</p><p>First added: ${earliest}</p><p>Last seen: ${latest}</p><button onclick="exportData()">Export JSON</button><button onclick="importPrompt()">Import JSON</button><button onclick="resetData()">Reset State</button><br/><textarea id="csvArea" style="display:none" placeholder="Paste JSON here"></textarea>`;}
+
+    /* ========= JSON import/export with filename IDs ========= */
+    async function exportData(){const[b1,b2]=await Promise.all([getAll(B1),getAll(B2)]);const filesArr=[...new Set(b1.concat(b2).map(c=>c.file))];const fileIdMap=Object.fromEntries(filesArr.map((f,i)=>[f,i]));const slim=(bucket,arr)=>arr.map(c=>({b:bucket==='bucket1'?1:2,f:fileIdMap[c.file],p:c.page,a:c.added,l:c.lastSeen,q:c.frequency,s:c.start,e:c.end}));const json={files:filesArr,cards:[...slim('bucket1',b1),...slim('bucket2',b2)]};const blob=new Blob([JSON.stringify(json)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='viewerRangeData.json';a.click();URL.revokeObjectURL(url);} 
+
+    function importPrompt(){const area=document.getElementById('csvArea');area.style.display='block';area.value='';const btn=document.createElement('button');btn.textContent='Import';area.after(btn);btn.onclick=async()=>{await importData(area.value);location.reload();};}
+
+    async function importData(text){text=text.trim();if(!text)return;let json;try{json=JSON.parse(text);}catch(e){alert('Invalid JSON');return;}const {files,cards}=json;if(!Array.isArray(files)||!Array.isArray(cards)){alert('Malformed JSON');return;}const promises=[];for(const c of cards){const fileName=files[c.f];if(!fileName)continue;promises.push(updateCard(c.b===1?B1:B2,fileName,c.p,c.s,c.e,{added:c.a,lastSeen:c.l,freqInc:c.q}));}await Promise.all(promises);} 
+
+    const resetData=()=>{const r=indexedDB.deleteDatabase(DB_NAME);r.onsuccess=()=>location.reload();};
+
+    /* ========= Main flow ========= */
+    async function displayPdf(){const params=getParams();if(params.portal){document.getElementById('pdfEmbed').style.display='none';return showPortal();}
+
+        const plus=hasPlusMode();const hashRand=endsWithHashMode();let file=params.fileName;let page;
+        if(hashRand&&file){const {start,end}=parseRange(file);page=Math.floor(rand()*(end-start+1))+start;}
+        else if(plus||!file){const card=await algoPick(plus?file:null);if(card){file=card.file;page=card.page;}else if(file){page=parseRange(file).start;}else{document.getElementById('pdfEmbed').remove();return;}}
+        else if(params.randIdx){page=parseInt(params.randIdx,10);}else{const {start,end}=parseRange(file);page=Math.floor(rand()*(end-start+1))+start;}
+
+        const {start,end}=parseRange(file);
+        if(!hashRand)await addVisit(file,page,start,end); // skip bucket logic record only if desired else comment out
+
+        const urlPDF=await pdfUrl(file);document.getElementById('pdfEmbed').src=`${urlPDF}#page=${page}`;
+        const url=new URL(window.location.href.replace(/\+$/,''));url.searchParams.set('fileName',file);url.searchParams.set('randIdx',page);history.replaceState(null,'',url);}
+
+    </script>
+</head>
+<body onload="displayPdf()">
+    <embed id="pdfEmbed" src="" type="application/pdf" />
+    <div id="portal"></div>
+</body>
+</html>
