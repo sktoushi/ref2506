@@ -8,7 +8,7 @@
 /* === Layout === */
 html,body{margin:0;padding:0;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Open Sans","Helvetica Neue",sans-serif;}
 #pdfEmbed{position:absolute;top:0;left:0;width:100%;height:100%;border:none;}
-/* === GitHub‑Issues‑Dark Portal === */
+/* === GitHub-Issues-Dark Portal === */
 #portal{display:none;box-sizing:border-box;padding:1rem;max-width:640px;margin:0 auto;height:100%;overflow-y:auto;background:#0d1117;color:#c9d1d9;}
 #portal h3{margin-top:0;color:#58a6ff;font-size:1.25rem;font-weight:600;}
 #portal p{margin:.4rem 0;font-size:.875rem;}
@@ -20,12 +20,20 @@ html,body{margin:0;padding:0;height:100%;overflow:hidden;font-family:-apple-syst
 <script>
 /* ========= Helpers ========= */
 const rand = ()=>{const a=new Uint32Array(1);crypto.getRandomValues(a);return a[0]/(0xffffffff+1);};
+
+/* --- Path helper --------------------------------------------------------- */
+const makeAbs = f =>
+  /^(?:https?:|\/)/.test(f)            // already absolute or root-relative?
+    ? f
+    : new URL(f, location.href).href;  // otherwise resolve against current doc
+/* ------------------------------------------------------------------------- */
+
 const getParams = ()=>{const p=new URLSearchParams(window.location.search.replace(/\+$/,''));return{fileName:p.get('fileName')||null,randIdx:p.get('randIdx'),portal:p.has('portal'),sandbox:p.get('indexedDB')||null};};
 const hasPlusMode   = ()=>window.location.search.endsWith('+');
 const hashRandMode  = ()=>window.location.href.endsWith('#');
 const parseRange    = n=>{const m=n? n.match(/-(\d+)-(\d+)\.pdf$/):null;return m?{start:+m[1],end:+m[2]}:{start:1,end:1};};
 /* === Compact timestamp === */
-const encodeTs = ts=>ts.toString(36);                   // base‑36 for compactness
+const encodeTs = ts=>ts.toString(36);                   // base-36 for compactness
 const decodeTs = s=>typeof s==='number'?s:parseInt(s,36);
 const nowEnc   = ()=>encodeTs(Date.now());
 /* ========= IndexedDB constants ========= */
@@ -79,11 +87,30 @@ async function getPdf(file){const db=await openPdfCache();return new Promise((re
 async function putPdf(file,blob){const db=await openPdfCache();return new Promise((res,rej)=>{const tx=db.transaction('files','readwrite');tx.objectStore('files').put(blob,file);tx.oncomplete=()=>res();tx.onerror=e=>rej(e.target.error);});}
 async function pdfUrl(file){let b=await getPdf(file);if(!b){b=await (await fetch(file)).blob();await putPdf(file,b);}return URL.createObjectURL(b);} 
 /* === Portal === */
-async function showPortal(){const[b1,b2]=await Promise.all([getAll('bucket1'),getAll('bucket2')]);const all=b1.concat(b2);const size=new Blob([JSON.stringify({b1,b2})]).size;const earliest=all.length?new Date(Math.min(...all.map(c=>decodeTs(c.added)))).toLocaleString():'N/A';const latest=all.length?new Date(Math.max(...all.map(c=>decodeTs(c.lastSeen)))).toLocaleString():'N/A';const div=document.getElementById('portal');div.style.display='block';div.innerHTML=`<h3>Portal</h3><p>Total JSON size: ${size} bytes</p><p>Bucket1: ${b1.length} cards</p><p>Bucket2: ${b2.length} cards</p><p>First added: ${earliest}</p><p>Last seen: ${latest}</p><button onclick="exportData()">Export JSON</button><button onclick="importPrompt()">Import JSON</button><button onclick="resetData()">Reset State</button><br/><textarea id="textareaImport" style="display:none" placeholder="Paste JSON here"></textarea>`;}
+async function showPortal(){const[b1,b2]=await Promise.all([getAll('bucket1'),getAll('bucket2')]);const all=b1.concat(b2);const size=new Blob([JSON.stringify({b1,b2})]).size;const earliest=all.length?new Date(Math.min(...all.map(c=>decodeTs(c.added)))).toLocaleString():'N/A';const latest=all.length?new Date(Math.max(...all.map(c=>decodeTs(c.lastSeen)))).toLocaleString():'N/A';const div=document.getElementById('portal');div.style.display='block';div.innerHTML=`<h3>Portal</h3><p>Total JSON size: ${size} bytes</p><p>Bucket1: ${b1.length} cards</p><p>Bucket2: ${b2.length} cards</p><p>First added: ${earliest}</p><p>Last seen: ${latest}</p><button onclick="exportData()">Export JSON</button><button onclick="importPrompt()">Import JSON</button><button onclick="resetData()">Reset State</button><br/><textarea id="textareaImport" style="display:none" placeholder="Paste JSON here"></textarea>`;}
 /* === Export / Import === */
-async function exportData(){const[b1,b2]=await Promise.all([getAll('bucket1'),getAll('bucket2')]);const fileArr=[...new Set(b1.concat(b2).map(c=>c.file))];const idMap=Object.fromEntries(fileArr.map((f,i)=>[f,i]));const slim=(b,a)=>a.map(c=>({b:b==='bucket1'?1:2,f:idMap[c.file],p:c.page,a:c.added,l:c.lastSeen,q:c.frequency,s:c.start,e:c.end}));const json={files:fileArr,cards:[...slim('bucket1',b1),...slim('bucket2',b2)]};const blob=new Blob([JSON.stringify(json)],{type:'application/json'});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download='viewerRangeData.json';a.click();URL.revokeObjectURL(url);} 
+async function exportData(){
+  const[b1,b2]=await Promise.all([getAll('bucket1'),getAll('bucket2')]);
+  const fileArr=[...new Set(b1.concat(b2).map(c=>makeAbs(c.file)))];  /* <-- modified */
+  const idMap=Object.fromEntries(fileArr.map((f,i)=>[f,i]));
+  const slim=(b,a)=>a.map(c=>({b:b==='bucket1'?1:2,f:idMap[c.file],p:c.page,a:c.added,l:c.lastSeen,q:c.frequency,s:c.start,e:c.end}));
+  const json={files:fileArr,cards:[...slim('bucket1',b1),...slim('bucket2',b2)]};
+  const blob=new Blob([JSON.stringify(json)],{type:'application/json'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download='viewerRangeData.json';a.click();URL.revokeObjectURL(url);
+}
 function importPrompt(){const area=document.getElementById('textareaImport');area.style.display='block';area.value='';const btn=document.createElement('button');btn.textContent='Import';area.after(btn);btn.onclick=async()=>{await importData(area.value);location.reload();};}
-async function importData(txt){txt=txt.trim();if(!txt)return;let j;try{j=JSON.parse(txt);}catch(e){alert('Invalid JSON');return;}const {files,cards}=j;if(!Array.isArray(files)||!Array.isArray(cards)){alert('Malformed JSON');return;}const ops=[];for(const c of cards){const f=files[c.f];if(!f)continue;ops.push(updateCard(c.b===1?'bucket1':'bucket2',f,c.p,c.s,c.e,{added:c.a,lastSeen:c.l,freqInc:c.q}));}await Promise.all(ops);} 
+async function importData(txt){
+  txt=txt.trim();if(!txt)return;let j;try{j=JSON.parse(txt);}catch(e){alert('Invalid JSON');return;}
+  const {files,cards}=j;if(!Array.isArray(files)||!Array.isArray(cards)){alert('Malformed JSON');return;}
+  const ops=[];
+  for(const c of cards){
+    const f = makeAbs(files[c.f]);                       /* <-- modified */
+    if(!f)continue;
+    ops.push(updateCard(c.b===1?'bucket1':'bucket2',f,c.p,c.s,c.e,{added:c.a,lastSeen:c.l,freqInc:c.q}));
+  }
+  await Promise.all(ops);
+}
 const resetData=()=>{if(SANDBOX){sandboxData.bucket1.length=sandboxData.bucket2.length=0;location.reload();return;}const r=indexedDB.deleteDatabase(DB_NAME);r.onsuccess=()=>location.reload();};
 /* === Sandbox Loader === */
 async function loadSandbox(file){SANDBOX=true;const txt=await (await fetch(file)).text();try{await importData(txt);}catch(e){console.error('Sandbox load failed',e);} }
