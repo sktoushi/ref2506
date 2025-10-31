@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PDF Random Page Viewer (Chunked IndexedDB Caching)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      min-height: 100svh; display: grid; place-items: center;
+      background:#cfcfcf; transition: background .6s ease;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    .paper {
+      width:min(100%, 980px);
+      background:#fff;
+      border-radius: 18px; box-shadow:0 4px 12px rgba(0,0,0,.1);
+      padding: 2rem;
+    }
+  </style>
+</head>
+<body>
+<main class="paper">
+  <h1 class="mb-3">PDF Random Page Viewer</h1>
+  <p class="text-secondary">Use <code>?fileName=1.pdf</code>. Then click “Copy page text” to send it to ChatGPT.</p>
+  <div id="status" class="mb-2">Loading…</div>
+  <p><strong>File:</strong> <span id="file"></span> | <strong>Pages:</strong> <span id="count"></span> | Current page: <span id="currentPage">—</span></p>
+  <div class="mb-3">
+    <button id="reroll" class="btn btn-primary btn-sm">Random page</button>
+    <button id="copyTextBtn" class="btn btn-success btn-sm">📋 Copy page text + launch ChatGPT</button>
+    <button id="clearCache" class="btn btn-outline-danger btn-sm float-end">🗑️ Clear Cache</button>
+  </div>
+  <canvas id="pdfCanvas" style="width:100%;background:white;border-radius:8px;"></canvas>
+</main>
+
+<script type="module">
+import { getDocument, GlobalWorkerOptions } from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.mjs";
+GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.mjs";
+
+const $ = s => document.querySelector(s);
+const statusEl = $("#status"), fileEl = $("#file"), countEl = $("#count"), currentEl = $("#currentPage");
+const copyBtn = $("#copyTextBtn"), rerollBtn = $("#reroll"), clearBtn = $("#clearCache");
+const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
+
+let pdf = null, total = 0, current = 1;
+const params = new URLSearchParams(location.search);
+const rawFile = params.get("fileName");
+
+function sanitizePdfName(name) {
+  if (!name) return null;
+  const s = decodeURIComponent(name).trim();
+  if (!/^[A-Za-z0-9._-]+\.pdf$/i.test(s)) return null;
+  return s;
+}
+function fail(msg){ statusEl.style.color="red"; statusEl.textContent=msg; }
+function ok(msg){ statusEl.style.color="green"; statusEl.textContent=msg; }
+function randomInt(min,max){ const r=new Uint32Array(1);crypto.getRandomValues(r);return min+Math.floor((r[0]/2**32)*(max-min+1)); }
+
+// --- IndexedDB setup ---
+const DB_NAME = "pdfCacheDB";
+const STORE_NAME = "pdfs";
+const CHUNK_SIZE = 1024 * 1024; // 1MB
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE_NAME);
+    req.onerror = () => reject(req.error);
+    req.onsuccess = () => resolve(req.result);
+  });
+}
+
+async function clearAllCache() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    const req = store.clear();
+    tx.oncomplete = () => resolve();
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function fetchChunk(url, start, end) {
+  const headers = { Range: `bytes=${start}-${end-1}` };
+  const resp = await fetch(url, { headers });
+  if (!resp.ok && resp.status !== 206) throw new Error(`Chunk fetch failed: ${resp.statusText}`);
+  return await resp.arrayBuffer();
+}
+
+async function storeChunk(name, start, chunk) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, "readwrite");
+    const store = tx.objectStore(STORE_NAME);
+    store.put(chunk, `${name}-chunk-${start}`);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function getCachedChunks(name) {
+  const db = await openDB();
+  const tx = db.transaction(STORE_NAME, "readonly");
+  const store = tx.objectStore(STORE_NAME);
+  const req = store.getAllKeys();
+
+  return new Promise((resolve, reject) => {
+    req.onsuccess = async () => {
+      const keys = req.result.filter(k => k.startsWith(`${name}-chunk-`));
+      if (keys.length === 0) return resolve(null);
+      keys.sort((a,b)=>parseInt(a.split("-").pop()) - parseInt(b.split("-").pop()));
+
+      const chunkPromises = keys.map(k => new Promise((res, rej) => {
+        const r = store.get(k);
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      }));
+      const chunks = await Promise.all(chunkPromises);
+      resolve(new Blob(chunks));
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function loadAndCachePdfChunks(name, url) {
+  const head = await fetch(url, { method: "HEAD" });
+  const size = parseInt(head.headers.get("content-length") || "0");
+  if (!size) throw new Error("Could not get content length");
+
+  const chunks = [];
+  for (let start = 0; start < size; start += CHUNK_SIZE) {
+    const end = Math.min(start + CHUNK_SIZE, size);
+    statusEl.textContent = `Fetching chunk ${Math.floor(start/CHUNK_SIZE)+1}/${Math.ceil(size/CHUNK_SIZE)}…`;
+    const chunk = await fetchChunk(url, start, end);
+    await storeChunk(name, start, chunk);
+    chunks.push(chunk);
+  }
+  return new Blob(chunks).arrayBuffer();
+}
+// --- end IndexedDB setup ---
+
+async function renderPage(n) {
+  if (!pdf) return;
+  const page = await pdf.getPage(n);
+  const vp = page.getViewport({scale:1.5});
+  canvas.width = vp.width; canvas.height = vp.height;
+  await page.render({canvasContext:ctx, viewport:vp}).promise;
+  current = n;
+  currentEl.textContent = n;
+}
+
+async function loadPdf(name) {
+  const safe = sanitizePdfName(name);
+  if (!safe) { fail("Invalid ?fileName parameter."); throw new Error("invalid name"); }
+
+  const url = new URL("./" + safe, location.href);
+  const cachedBlob = await getCachedChunks(safe);
+  let dataBuffer;
+
+  if (cachedBlob) {
+    ok("Loaded from cached chunks.");
+    dataBuffer = await cachedBlob.arrayBuffer();
+  } else {
+    ok("Streaming and caching chunks…");
+    dataBuffer = await loadAndCachePdfChunks(safe, url.href);
+  }
+
+  const doc = getDocument({ data: dataBuffer });
+  pdf = await doc.promise;
+  total = pdf.numPages;
+  fileEl.textContent = safe;
+  countEl.textContent = total;
+  await renderPage(randomInt(1,total));
+}
+
+rerollBtn.addEventListener("click",()=>renderPage(randomInt(1,total)));
+
+async function extractCurrentPageText(){
+  if(!pdf) throw new Error("PDF not loaded");
+  const page=await pdf.getPage(current);
+  const text=await page.getTextContent();
+  return text.items.map(i=>i.str).join(" ").replace(/\s+/g," ").trim();
+}
+
+copyBtn.addEventListener("click",async()=>{
+  const orig=copyBtn.innerHTML;
+  try{
+    const raw=await extractCurrentPageText();
+    const prefixed=`4chan: explain this ${raw}`;
+    await navigator.clipboard.writeText(prefixed);
+    window.open(`https://chat.openai.com/?q=${encodeURIComponent(prefixed)}`,"_blank");
+    copyBtn.classList.replace("btn-success","btn-outline-success");
+    copyBtn.innerHTML="✅ Copied & launched!";
+    setTimeout(()=>{copyBtn.classList.replace("btn-outline-success","btn-success");copyBtn.innerHTML=orig;},2000);
+  }catch(e){
+    console.error(e);
+    fail("Copy or ChatGPT launch failed");
+  }
+});
+
+clearBtn.addEventListener("click", async()=>{
+  await clearAllCache();
+  ok("Cache cleared.");
+});
+
+(async()=>{
+  try{
+    if(!rawFile) throw new Error("Missing ?fileName param");
+    await loadPdf(rawFile);
+  }catch(e){
+    console.error(e);
+    fail("Failed: "+(e.message||e));
+  }
+})();
+</script>
+</body>
+</html>
