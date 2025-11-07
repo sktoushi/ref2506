@@ -127,6 +127,7 @@
       <div class="actions">
         <button id="reroll" class="btn btn-small" aria-label="Pick a random page">🎲 Random page</button>
         <button id="copyTextBtn" class="btn btn-accent btn-small">📋 Copy page text + launch ChatGPT</button>
+        <button id="copyAmp2Btn" class="btn btn-accent btn-small">📋 Copy page text (Amp2) + launch ChatGPT</button>
         <div class="spacer"></div>
         <button id="clearCache" class="btn btn-outline btn-small" title="Clear IndexedDB cached chunks">🗑️ Clear cache</button>
       </div>
@@ -145,6 +146,7 @@
     const $ = s => document.querySelector(s);
     const statusEl = $("#status"), fileEl = $("#file"), countEl = $("#count"), currentEl = $("#currentPage");
     const copyBtn = $("#copyTextBtn"), rerollBtn = $("#reroll"), clearBtn = $("#clearCache");
+    const amp2Btn = $("#copyAmp2Btn");
     const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
 
     function hasCrypto(){ return typeof crypto !== 'undefined' && crypto?.getRandomValues; }
@@ -307,6 +309,7 @@
       return text.items.map(i=>i.str).join(" ").replace(/\s+/g," ").trim();
     }
 
+    // Original "4chan: explain this" copy button
     copyBtn.addEventListener("click", async ()=>{
       const origHTML = copyBtn.innerHTML;
       try{
@@ -318,6 +321,23 @@
         copyBtn.classList.remove("btn-accent"); copyBtn.classList.add("btn-outline");
         copyBtn.innerHTML="✅ Copied & launched!";
         setTimeout(()=>{ copyBtn.classList.remove("btn-outline"); copyBtn.classList.add("btn-accent"); copyBtn.innerHTML=origHTML; }, 1800);
+      }catch(e){
+        console.error(e);
+        setStatus("Copy or ChatGPT launch failed", "err");
+      }
+    });
+
+    // New "Amp2 explain this:" copy button
+    amp2Btn.addEventListener("click", async ()=>{
+      const origHTML = amp2Btn.innerHTML;
+      try{
+        const raw=await extractCurrentPageText();
+        const prefixed=`Amp2 explain this: ${raw}`;
+        await navigator.clipboard.writeText(prefixed);
+        window.open(`https://chat.openai.com/?q=${encodeURIComponent(prefixed)}`,"_blank","noopener");
+        amp2Btn.classList.remove("btn-accent"); amp2Btn.classList.add("btn-outline");
+        amp2Btn.innerHTML="✅ Copied & launched!";
+        setTimeout(()=>{ amp2Btn.classList.remove("btn-outline"); amp2Btn.classList.add("btn-accent"); amp2Btn.innerHTML=origHTML; }, 1800);
       }catch(e){
         console.error(e);
         setStatus("Copy or ChatGPT launch failed", "err");
