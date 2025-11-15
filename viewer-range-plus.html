@@ -314,7 +314,7 @@
       const origHTML = copyBtn.innerHTML;
       try{
         const raw=await extractCurrentPageText();
-        const prefixed=`4chan: explain this ${raw}`;
+        const prefixed=`4chan: explain this using chatgpt 4o ${raw}`;
         await navigator.clipboard.writeText(prefixed);
         // New ChatGPT app URL
         window.open(`https://chat.openai.com/?q=${encodeURIComponent(prefixed)}`,"_blank","noopener");
